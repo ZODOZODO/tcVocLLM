@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+streamlit
+httpx
+python-dotenv
+loguru
+chromadb
+pypdf

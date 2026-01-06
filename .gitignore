@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# venv
+.venv/
+venv/
+
+# Local env
+.env
+
+# Streamlit
+.streamlit/
+
+# OS / IDE
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Data / Vector DB / Embeddings cache (용량 큼, 환경 의존)
+data/chroma/
+data/embed_cache/
+data/uploads/
+*.log
+
+# 모델/캐시(사용 환경 따라)
+.cache/

@@ -1,0 +1,73 @@
+# 반도체 매엽 시나리오
+
+## 개요
+- 설비에서 Lot 진행이 가능한 PORT 상태를 확인하고, MES(MOS) ↔ TC ↔ TOOL 간 메시지 교환을 통해 작업을 진행합니다.
+- 참고: S6F11 이벤트의 CEID는 설비사마다 다를 수 있습니다.
+
+## 1) 설비 상태 Check (Tool Condition)
+- 설비 상태 Check. 설비에서 Lot 진행이 가능한 PORT 의 상태를 Check 한다.
+- MES(MOS) -> TC : TOOL_CONDITION_REQUEST
+- TC -> TOOL : S1F3
+- TOOL -> TC : S1F4
+- TC -> MES(MOS) : TOOL_CONDITION_REPLY
+
+## 2) Job 예약 (Work Order)
+- Job 예약
+- MES(MOS) -> TC : WORK_ORDER_REQUEST
+- TC -> MES(MOS) : WORK_ORDER_REPLY
+- TC -> TOOL : S10F3
+- TOOL -> TC : S10F4
+
+## 3) PORT LOAD 및 상태 변경
+- TOOL -> TC : S6F11 (PORT LOAD EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : PORT_STATE_CHANGE (IDLE -> LOAD)
+
+## 4) CARRIER READ 및 ID 확인
+- TOOL -> TC : S6F11 (CARRIER READ EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : CARRIERID_READ
+- MES(MOS) -> TC : CARRIERID_READ_REPLY
+- TC -> TOOL : S3F17
+- TOOL -> TC : S3F18
+
+## 5) Carrier verification
+- TOOL -> TC : S6F11 (carrier verification EVENT) (설비사마다 CEID 가 다름)
+- TC -> TOOL : S3F17
+- TOOL -> TC : S3F18
+
+## 6) READY TO LOAD ~ WORK START
+- TOOL -> TC : S6F11 (READY TO LOAD EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : READ_TO_LOAD
+- MES(MOS) -> TC : WORK_START_REQUEST
+- TC -> TOOL : S16F11 or S16F15
+- TOOL -> TC : S16F12 or S16F16
+- TC -> TOOL : S14F9
+- TOOL -> TC : S14F10
+- TC -> MES(MOS) : WORK_START_REPLY
+- TC -> MES(MOS) : DCSPECREQ
+- MES(MOS) -> TC : DCSPECREQ_REP
+
+## 7) PROCESS START / 중간 이벤트 / PROCESS END
+- TOOL -> TC : S6F11 (PROCESS START EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : PROCESS_STARTED
+
+- TOOL -> TC : S6F11 (WAFER or CHAMBER EVENT) (설비사마다 CEID 가 다름)
+
+- TOOL -> TC : S6F11 (PROCESS END EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : PROCESS_ENDED
+
+## 8) TKOUT ~ DATACOLL ~ WORK COMPLETED
+- TOOL -> TC : S6F11 (TKOUT EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : DATACOLL
+- MES(MOS) -> TC : DATACOLL_REP
+- TC -> MES(MOS) : WORK_COMPLETED
+- MES(MOS) -> TC : WORK_COMPLETED_REP
+
+## 9) UNLOAD 및 PORT 상태 변경
+- TOOL -> TC : S6F11 (UNLOAD EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : UNLOAD_REQUEST
+- TC -> MES(MOS) : PORT_STATE_CHANGE (LOAD -> UNLOAD)
+
+## 10) CARRIER COMPLETED 및 PORT IDLE 복귀
+- TOOL -> TC : S6F11 (CARRIER COMPLETED EVENT) (설비사마다 CEID 가 다름)
+- TC -> MES(MOS) : CARRIER_UNLOAD_COMPLETED
+- TC -> MES(MOS) : PORT_STATE_CHANGE (UNLOAD -> IDLE)
