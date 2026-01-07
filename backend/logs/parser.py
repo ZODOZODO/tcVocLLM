@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict
 
-
 # 예시 라인:
 # 2026-01-06 00:00:10.114 [TID=00000005][INFO][recvEQP] S6F11 [WORK=S_2000_LOAD CEID=10000] PORTID=1 LPSTATE=LOAD [PROCESS=A_TBLSET02]
 LINE_RE = re.compile(
@@ -13,10 +12,9 @@ LINE_RE = re.compile(
     r"(?P<msg>.*)$"
 )
 
-# ✅ 값이 "..."(공백 포함)인 경우도 파싱되도록 개선
+# ✅ 개선: ERRORMSG="PORT STATE IS NOT IDLE" 처럼 공백/따옴표 포함 값을 제대로 잡기
 KV_RE = re.compile(r'(?P<k>[A-Z0-9_]+)=(?P<v>"[^"]*"|[^\s\]]+)')
 
-# WORK/CEID는 "둘 다 있을 때만" 로직 진행으로 인정
 WORK_CEID_RE = re.compile(r"\[WORK=(?P<work>[^ \]]+)\s+CEID=(?P<ceid>\d+)\]")
 
 
@@ -51,12 +49,12 @@ def parse_line(line: str) -> Optional[LogEvent]:
     channel = (m.group("channel") or "").strip() if m.group("channel") else ""
     msg = (m.group("msg") or "").strip()
 
-    # key=value 파싱 (따옴표 값은 따옴표 제거)
+    # key=value 파싱 (따옴표 제거)
     kv: Dict[str, str] = {}
     for mm in KV_RE.finditer(msg):
         k = mm.group("k")
-        v = mm.group("v")
-        if v.startswith('"') and v.endswith('"') and len(v) >= 2:
+        v = mm.group("v") or ""
+        if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
             v = v[1:-1]
         kv[k] = v
 
@@ -68,7 +66,7 @@ def parse_line(line: str) -> Optional[LogEvent]:
     # 메시지명 추정: 맨 앞 토큰(공백 전까지)
     msg_name = msg.split()[0].strip() if msg else None
 
-    # WORK/CEID 추출 (둘 다 있어야 “로직 진행 이벤트”로 인정)
+    # WORK/CEID 추출 (둘 다 있어야 “로직 진행 S6F11”로 인정)
     work = None
     ceid = None
     mc = WORK_CEID_RE.search(msg)
