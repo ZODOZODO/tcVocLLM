@@ -16,7 +16,7 @@ load_dotenv()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 
-# 절차형 근거 판단 기준(근거에 '->' 라인이 충분히 많으면 절차 누락 방지 모드)
+# 절차형 근거 판단 기준(근거에 '->' 라인이 충분히 많으면 절차형으로 간주)
 PROCEDURE_MIN_LINES = int(os.getenv("PROCEDURE_MIN_LINES", "8"))
 PROCEDURE_MAX_LINES = int(os.getenv("PROCEDURE_MAX_LINES", "80"))
 
@@ -70,7 +70,7 @@ def _has_han_or_kana(s: str) -> bool:
 def _sort_hits_in_doc_order(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     retriever가 같은 섹션에서 여러 청크를 줄 수 있으므로,
-    문서/청크 순으로 정렬해 컨텍스트와 절차 추출의 연속성을 높임.
+    문서/청크 순으로 정렬해 컨텍스트 연속성을 높임.
     """
     def key(h: Dict[str, Any]) -> Tuple[str, int, int]:
         meta = h.get("metadata") or {}
@@ -90,13 +90,14 @@ def _sort_hits_in_doc_order(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(hits, key=key)
 
 
-def _extract_arrow_lines(text: str) -> List[str]:
+def _extract_procedure_steps(text: str) -> List[Dict[str, str]]:
     """
-    문서에서 'A -> B : MSG ...' 형태 라인을 추출(원문 보존).
+    문서에서 'A -> B : MSG ...' 형태 라인을 구조화하여 추출.
+    - 원문을 그대로 출력하지 않기 위해, "구조화 데이터"로만 제공
     """
-    out: List[str] = []
+    steps: List[Dict[str, str]] = []
     if not text:
-        return out
+        return steps
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -110,26 +111,26 @@ def _extract_arrow_lines(text: str) -> List[str]:
             line = line.lstrip("*").strip()
 
         m = re.match(r"^(?P<src>.+?)\s*->\s*(?P<dst>.+?)\s*:\s*(?P<msg>.+?)\s*$", line)
-        if m:
-            src = m.group("src").strip()
-            dst = m.group("dst").strip()
-            msg = m.group("msg").strip()
-            out.append(f"{src} -> {dst} : {msg}")
+        if not m:
+            continue
 
-    return out
+        src = m.group("src").strip()
+        dst = m.group("dst").strip()
+        msg = m.group("msg").strip()
 
+        steps.append({"src": src, "dst": dst, "msg": msg})
 
-def _validate_contains_lines(answer: str, required_lines: List[str]) -> List[str]:
-    """
-    답변에 required_lines가 모두 포함되었는지 검사(부분 문자열 포함으로 체크).
-    - '한 글자도 바꾸지 말고' 정책을 유지하기 위해 엄격 비교 유지.
-    """
-    missing = []
-    a = answer or ""
-    for line in required_lines:
-        if line not in a:
-            missing.append(line)
-    return missing
+    # 중복 제거(순서 유지)
+    seen = set()
+    uniq: List[Dict[str, str]] = []
+    for s in steps:
+        key = (s["src"], s["dst"], s["msg"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(s)
+
+    return uniq
 
 
 def _call_ollama(system_msg: str, user_msg: str, retry_msg: Optional[str] = None) -> str:
@@ -212,46 +213,56 @@ def chat(req: ChatRequest):
 
     context = "\n\n".join(context_blocks).strip()
 
-    # 근거에서 절차 라인(arrow lines) 추출
+    # 근거에서 절차형 라인 추출(구조화)
     combined_docs = "\n".join([(h.get("document") or "") for h in ordered_hits])
-    arrow_lines = _extract_arrow_lines(combined_docs)
+    proc_steps = _extract_procedure_steps(combined_docs)
 
-    # "절차형 근거" 판단: 근거 형태 기반(질문 키워드 하드코딩 없음)
-    require_procedure = len(arrow_lines) >= PROCEDURE_MIN_LINES
+    # 절차형 근거 판단: 문서 형태 기반(질문 키워드 하드코딩 없음)
+    require_procedure = len(proc_steps) >= PROCEDURE_MIN_LINES
 
-    # 언어 규칙 명확화: 설명 문장은 한국어, 기술 토큰/원문 라인은 허용
+    # 언어 규칙 명확화: 설명 문장은 한국어, 기술 토큰/원문 단어는 허용
     system_msg = (
         "당신은 반도체 공정/운영 VOC 지원 챗봇입니다.\n"
         "사용자는 초보자(아무것도 모름)라고 가정하고, 상세하고 단계적으로 설명하세요.\n"
         "\n"
         "[언어 규칙]\n"
         "- 설명/문장은 반드시 한국어로만 작성하세요.\n"
-        "- 단, 근거에 등장하는 기술 토큰/약어(APC, MES, S6F11 등), 메시지명, 원문 절차 라인은 원문 그대로 사용/인용하는 것은 허용됩니다.\n"
+        "- 근거에 등장하는 기술 토큰/약어(APC, MES, S6F11 등), 메시지명은 필요한 경우에만 그대로 언급 가능합니다.\n"
         "- 중국어/일본어(한자/가나)는 절대 사용하지 마세요.\n"
         "\n"
         "[근거 규칙]\n"
         "- 아래 [근거]에 있는 내용만 사용해 답변하세요.\n"
         "- 근거에 없는 내용은 추측하지 말고 '근거 부족'이라고 명시하고, 추가로 필요한 정보를 질문하세요.\n"
         "- 근거에 없는 예시(임의 사례, 임의 공정 파라미터 등)를 만들지 마세요.\n"
+        "\n"
+        "[중요]\n"
+        "- 만약 절차형 근거가 주어지면, 답변은 '순서'를 지키되 원문 형태(예: A -> B : MSG)를 그대로 복사해 출력하지 마세요.\n"
+        "- 즉, 원문 절차를 그대로 붙여넣는 섹션(원문 절차 흐름)을 만들지 마세요.\n"
     )
 
-    procedure_block = ""
-    required_lines: List[str] = []
+    # 절차형이면 "출력 금지" 참고자료를 제공(순서 유지 목적)
+    procedure_hint = ""
     if require_procedure:
-        required_lines = arrow_lines[:PROCEDURE_MAX_LINES]
-        procedure_block = (
-            "\n[절차 라인(근거에서 추출됨)]\n"
-            "아래 라인들은 절차 흐름의 핵심입니다.\n"
-            "답변의 '원문 절차 흐름' 섹션에 아래 라인들을 반드시 포함하세요.\n"
-            "- 반드시 ```text``` 코드블록 안에 그대로 붙여넣으세요.\n"
-            "- 한 글자도 바꾸지 말고 동일 순서로 포함하세요.\n"
-            "그리고 각 라인이 무엇을 의미하는지 단계별로 초보자에게 설명하세요.\n\n"
-            "```text\n" + "\n".join(required_lines) + "\n```\n"
+        steps = proc_steps[:PROCEDURE_MAX_LINES]
+        # 모델이 그대로 복사하지 않도록: 구조화 + 출력금지 강하게 명시
+        # (표현은 '->' 형태를 피하고, src/dst/msg 필드로만 제공)
+        lines = []
+        for i, s in enumerate(steps, start=1):
+            lines.append(f"{i}. src={s['src']} | dst={s['dst']} | msg={s['msg']}")
+        procedure_hint = (
+            "\n[절차 참고자료(출력 금지)]\n"
+            "- 아래 목록은 근거에서 추출한 절차의 '구조화 데이터'입니다.\n"
+            "- 답변에 이 목록을 그대로 복사/인용/재출력하지 마세요.\n"
+            "- 대신, 아래 순서를 유지하면서 초보자가 이해할 수 있게 단계별로 풀어서 설명하세요.\n"
+            "- 각 단계에서 '누가→누구에게 무엇을 보내는지/받는지'를 자연어로 설명하세요.\n"
+            "\n"
+            + "\n".join(lines)
+            + "\n"
         )
 
     user_msg = f"""[근거]
 {context}
-{procedure_block}
+{procedure_hint}
 
 [질문]
 {question}
@@ -260,9 +271,6 @@ def chat(req: ChatRequest):
 1) 결론(질문에 대한 핵심 답변)
 2) 상세 설명(초보자 기준으로 단계/흐름을 풀어서 설명)
 3) 근거 인용(관련 근거를 [1], [2]처럼 인용)
-4) 절차형 근거가 제공된 경우에만:
-   - "원문 절차 흐름" 섹션에 위 ```text``` 라인들을 그대로 포함
-   - 각 단계 해설을 덧붙이기
 """
 
     try:
@@ -290,40 +298,11 @@ def chat(req: ChatRequest):
                 retry_msg=(
                     "답변에 중국어/일본어(한자/가나)가 섞여 있습니다. "
                     "전체 답변을 한국어 설명 문장으로만 다시 작성하세요. "
-                    "근거의 기술 토큰/원문 라인만 예외적으로 그대로 인용 가능합니다. "
                     "근거에 없는 예시는 만들지 마세요."
                 ),
             )
             if answer2:
                 answer = answer2
-
-        # 3차: 절차형 근거인 경우, 라인 누락 검증 후 1회 재시도
-        if require_procedure and required_lines:
-            missing = _validate_contains_lines(answer, required_lines)
-            if missing:
-                sample = missing[:10]
-                retry_msg = (
-                    "답변에 '원문 절차 흐름'이 누락되었거나 원문 라인이 변경되었습니다.\n"
-                    "아래 라인들을 반드시 ```text``` 코드블록 안에, 한 글자도 바꾸지 말고 동일 순서로 포함해 다시 작성하세요.\n"
-                    "설명 문장은 한국어로만 작성하고, 근거 밖 예시는 만들지 마세요.\n"
-                    f"누락 예시(일부):\n- " + "\n- ".join(sample)
-                )
-                answer2 = _call_ollama(system_msg, user_msg, retry_msg=retry_msg)
-                if answer2:
-                    answer = answer2
-
-            if _has_han_or_kana(answer):
-                answer3 = _call_ollama(
-                    system_msg,
-                    user_msg,
-                    retry_msg=(
-                        "답변에 외국어(한자/가나)가 남아 있습니다. "
-                        "설명 문장은 한국어로만 최종 정리해서 다시 작성하세요. "
-                        "근거 밖 예시는 만들지 마세요."
-                    ),
-                )
-                if answer3:
-                    answer = answer3
 
         return ChatResponse(answer=answer, sources=sources)
 

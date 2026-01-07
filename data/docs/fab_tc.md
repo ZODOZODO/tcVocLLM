@@ -22,3 +22,7 @@
 ## FAB 공정
 - FAB TC 에서는 공정을 10개로 나누어서 개발한다.
 - CVD, CMP, DIFF(SINGLE/BATCH), IMP, ETCH, METAL, WET(SINGLE/BATCH), ETC, METRO, PHOTO
+
+## WORK
+- TC 는 WORK 이라는 단위으로 LOT 을 진행
+- 1개의 WORK에는 여러개의 CARRIER 가 들어갈 수 있고, CARRIER 에는 
