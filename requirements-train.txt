@@ -1,0 +1,9 @@
+# --- Fine-tuning / Training stack ---
+transformers>=4.42
+datasets>=2.20
+accelerate>=0.33
+peft>=0.11
+trl>=0.9
+
+# torch는 OS/GPU별 설치가 달라서 여기 고정하지 않는 걸 권장
+# bitsandbytes는 Windows에서 까다로울 수 있어 필요 시에만
