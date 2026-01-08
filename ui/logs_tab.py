@@ -1,5 +1,5 @@
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -8,6 +8,11 @@ from ui.ui_helper import get_http_client, decode_bytes_best_effort, scroll_to_an
 
 ANCHOR_ID_TIMELINE = "logs-timeline-anchor"
 ANCHOR_ID_TS = "logs-troubleshoot-anchor"
+
+# 위젯 key 분리(세션 충돌 방지)
+WKEY_CARID = "logs_selected_carid_widget"
+WKEY_LOTID = "logs_selected_lotid_widget"
+WKEY_ONLY_ERROR = "logs_only_error_widget"
 
 
 def _file_signature(name: str, raw: bytes) -> str:
@@ -20,7 +25,7 @@ def _normalize_troubleshoot_items(obj: Any) -> List[Dict[str, Any]]:
     """
     백엔드 응답 형태가 바뀌어도 최대한 표시가 되도록 흡수.
     기대 가능한 케이스:
-    - {"recommendations": [...]} / {"items": [...]} / {"results": [...]}
+    - {"recommendations": [...]} / {"items": [...]} / {"results": [...]} / {"matches": [...]}
     - {"answer": "...", "sources": [...]} (VOC처럼)
     - 그냥 list [...]
     """
@@ -34,7 +39,7 @@ def _normalize_troubleshoot_items(obj: Any) -> List[Dict[str, Any]]:
     if not isinstance(obj, dict):
         return [{"text": str(obj)}]
 
-    for k in ("recommendations", "items", "results", "hits", "candidates"):
+    for k in ("recommendations", "items", "results", "hits", "candidates", "matches"):
         v = obj.get(k)
         if isinstance(v, list):
             return [x if isinstance(x, dict) else {"text": str(x)} for x in v]
@@ -66,7 +71,7 @@ def render_logs_tab(backend_url: str) -> None:
 
     ss.setdefault("logs_scroll_pending", False)
 
-    # filters
+    # 내부 상태(=위젯 값이 복사되어 들어가는 곳)
     ss.setdefault("logs_selected_carid", "(전체)")
     ss.setdefault("logs_selected_lotid", "(전체)")
     ss.setdefault("logs_only_error", False)
@@ -87,7 +92,7 @@ def render_logs_tab(backend_url: str) -> None:
         key="logs_uploader",
     )
 
-    # ✅ 파일이 실제로 바뀐 경우에만 결과 초기화 (위젯 생성 전에만 state를 세팅)
+    # ✅ 파일이 실제로 바뀐 경우에만 결과 초기화
     if uploaded is not None:
         try:
             raw = uploaded.getvalue()
@@ -101,11 +106,17 @@ def render_logs_tab(backend_url: str) -> None:
                 # 결과/필터 초기화
                 ss.logs_timeline_result = None
                 ss.logs_troubleshoot_result = None
+
                 ss.logs_selected_carid = "(전체)"
                 ss.logs_selected_lotid = "(전체)"
                 ss.logs_only_error = False
 
-                ss.logs_ts_last_sig = ""  # 새 파일이면 추천도 새로
+                # 위젯 상태는 pop으로 안전하게 초기화(세션 충돌 방지)
+                ss.pop(WKEY_CARID, None)
+                ss.pop(WKEY_LOTID, None)
+                ss.pop(WKEY_ONLY_ERROR, None)
+
+                ss.logs_ts_last_sig = ""
         except Exception as e:
             st.error(f"파일 읽기 실패: {e}")
 
@@ -172,7 +183,7 @@ def render_logs_tab(backend_url: str) -> None:
                 )
                 r.raise_for_status()
                 ss.logs_troubleshoot_result = r.json()
-                ss.logs_ts_last_sig = ss.logs_file_sig  # 마지막 실행 파일 시그니처 기록
+                ss.logs_ts_last_sig = ss.logs_file_sig
                 request_scroll()
         except Exception as e:
             ss.logs_troubleshoot_result = None
@@ -190,12 +201,16 @@ def render_logs_tab(backend_url: str) -> None:
         st.markdown(f'<div id="{ANCHOR_ID_TIMELINE}"></div>', unsafe_allow_html=True)
         st.success(f"타임라인 완료: 전체 라인 {total_lines}, 타임라인 이벤트 {len(timeline)}")
 
+        # 위젯 key는 별도로 유지하되, 값은 내부 상태에서 가져와 초기화
+        ss.setdefault(WKEY_ONLY_ERROR, bool(ss.logs_only_error))
+
         st.checkbox(
             "에러/FAIL/Exception 후보만 보기",
-            value=ss.logs_only_error,
-            key="logs_only_error",
+            value=bool(ss[WKEY_ONLY_ERROR]),
+            key=WKEY_ONLY_ERROR,
             on_change=request_scroll,
         )
+        ss.logs_only_error = bool(ss[WKEY_ONLY_ERROR])
 
         carids = sorted({(x.get("carid") or "") for x in timeline if (x.get("carid") or "")})
         lotids = sorted({(x.get("lotid") or "") for x in timeline if (x.get("lotid") or "")})
@@ -203,27 +218,36 @@ def render_logs_tab(backend_url: str) -> None:
         car_opts = ["(전체)"] + carids
         lot_opts = ["(전체)"] + lotids
 
-        # ✅ 옵션에 없으면, 위젯 생성 전에만 보정
-        if ss.logs_selected_carid not in car_opts:
-            ss.logs_selected_carid = "(전체)"
-        if ss.logs_selected_lotid not in lot_opts:
-            ss.logs_selected_lotid = "(전체)"
+        # ✅ 옵션에 없으면, 위젯 생성 전에만 보정 (위젯 키에만 보정)
+        if ss.get(WKEY_CARID, ss.logs_selected_carid) not in car_opts:
+            ss[WKEY_CARID] = "(전체)"
+        else:
+            ss.setdefault(WKEY_CARID, ss.logs_selected_carid)
+
+        if ss.get(WKEY_LOTID, ss.logs_selected_lotid) not in lot_opts:
+            ss[WKEY_LOTID] = "(전체)"
+        else:
+            ss.setdefault(WKEY_LOTID, ss.logs_selected_lotid)
 
         f1, f2 = st.columns([2, 2])
         with f1:
             st.selectbox(
                 "CARID 필터",
                 car_opts,
-                key="logs_selected_carid",
+                key=WKEY_CARID,
                 on_change=request_scroll,
             )
         with f2:
             st.selectbox(
                 "LOTID 필터",
                 lot_opts,
-                key="logs_selected_lotid",
+                key=WKEY_LOTID,
                 on_change=request_scroll,
             )
+
+        # 내부 상태로 복사(위젯 key 직접 수정하지 않음)
+        ss.logs_selected_carid = ss[WKEY_CARID]
+        ss.logs_selected_lotid = ss[WKEY_LOTID]
 
         sel_carid = ss.logs_selected_carid
         sel_lotid = ss.logs_selected_lotid
@@ -300,54 +324,65 @@ def render_logs_tab(backend_url: str) -> None:
 
         items = _normalize_troubleshoot_items(tsr)
 
-        # 표시용 정규화: title/content/score/source 중심으로
-        normed: List[Dict[str, Any]] = []
-        for it in items:
-            if not isinstance(it, dict):
-                normed.append({"title": "", "content": str(it)})
-                continue
-            normed.append(
-                {
-                    "title": it.get("title") or it.get("section_path") or it.get("section_title") or it.get("name") or "",
-                    "score": it.get("score", it.get("rerank_score", it.get("distance", ""))),
-                    "source": it.get("source") or (it.get("metadata") or {}).get("source", ""),
-                    "content": it.get("content") or it.get("text") or it.get("document") or it.get("answer") or "",
-                }
+        # matches/items가 비어있는 응답도 있을 수 있으니 명확히 표시
+        if not items:
+            st.warning("추천 결과가 비어 있습니다. (troubleshooting.md source 필터/ingest source 값 불일치 가능)")
+            with st.expander("트러블슈팅 추천 원문(JSON) 보기"):
+                st.json(tsr)
+        else:
+            # 표시용 정규화: title/content/score/source 중심으로
+            normed: List[Dict[str, Any]] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    normed.append({"title": "", "content": str(it)})
+                    continue
+                normed.append(
+                    {
+                        "title": it.get("title")
+                        or it.get("section_path")
+                        or it.get("section_title")
+                        or it.get("name")
+                        or "",
+                        "score": it.get("score", it.get("rerank_score", it.get("distance", ""))),
+                        "source": it.get("source") or (it.get("metadata") or {}).get("source", ""),
+                        "content": it.get("content")
+                        or it.get("text")
+                        or it.get("document")
+                        or it.get("answer")
+                        or it.get("snippet")
+                        or "",
+                    }
+                )
+
+            df_ts = pd.DataFrame(normed, columns=["title", "score", "source", "content"])
+            df_ts["content_preview"] = df_ts["content"].apply(
+                lambda s: (str(s)[:200] + " ...") if s and len(str(s)) > 200 else str(s)
             )
 
-        # 표로 먼저 보여주고, 상세는 expander로
-        df_ts = pd.DataFrame(normed, columns=["title", "score", "source", "content"])
+            st.caption("트러블슈팅 추천(문서 기반)")
+            st.dataframe(
+                df_ts[["title", "score", "source", "content_preview"]],
+                use_container_width=True,
+                height=300,
+            )
 
-        # content는 길면 표에서는 보기 힘드니 축약 컬럼 추가
-        df_ts["content_preview"] = df_ts["content"].apply(
-            lambda s: (str(s)[:200] + " ...") if s and len(str(s)) > 200 else str(s)
-        )
+            with st.expander("트러블슈팅 추천 원문(JSON) 보기"):
+                st.json(tsr)
 
-        st.caption("트러블슈팅 추천(문서 기반)")
-        st.dataframe(
-            df_ts[["title", "score", "source", "content_preview"]],
-            use_container_width=True,
-            height=300,
-        )
-
-        with st.expander("트러블슈팅 추천 원문(JSON) 보기"):
-            st.json(tsr)
-
-        # 개별 상세
-        with st.expander("추천 상세 보기"):
-            for i, row in enumerate(normed[: int(ss.logs_ts_limit)], start=1):
-                title = row.get("title") or f"추천 {i}"
-                st.markdown(f"**{i}. {title}**")
-                meta_line = []
-                if row.get("score") != "":
-                    meta_line.append(f"score={row.get('score')}")
-                if row.get("source"):
-                    meta_line.append(f"source={row.get('source')}")
-                if meta_line:
-                    st.caption(" / ".join(meta_line))
-                if row.get("content"):
-                    st.markdown(str(row.get("content")))
-                st.divider()
+            with st.expander("추천 상세 보기"):
+                for i, row in enumerate(normed[: int(ss.logs_ts_limit)], start=1):
+                    title = row.get("title") or f"추천 {i}"
+                    st.markdown(f"**{i}. {title}**")
+                    meta_line = []
+                    if row.get("score") != "":
+                        meta_line.append(f"score={row.get('score')}")
+                    if row.get("source"):
+                        meta_line.append(f"source={row.get('source')}")
+                    if meta_line:
+                        st.caption(" / ".join(meta_line))
+                    if row.get("content"):
+                        st.markdown(str(row.get("content")))
+                    st.divider()
 
     # ---------- scroll ----------
     if ss.logs_scroll_pending:

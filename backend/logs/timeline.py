@@ -1,79 +1,98 @@
-from typing import List, Dict, Any
-from backend.logs.parser import parse_line, LogEvent
+from __future__ import annotations
 
-# “로직 메시지”로 인정할 채널
-LOGIC_CHANNELS = {"recvMOS", "sendMOS", "recvEQP", "sendEQP"}
+from typing import Any, Dict, List, Optional
+
+from backend.logs.parser import parse_line
 
 
-def is_logic_event(ev: LogEvent) -> bool:
+def is_logic_event(ev: Any) -> bool:
+    work = (getattr(ev, "work", "") or "").strip()
+    ceid = (getattr(ev, "ceid", "") or "").strip()
+    return bool(work and ceid)
+
+
+def is_error_like(ev: Any) -> bool:
     """
-    ✅ 로직 이벤트 판정
-    - 기본: 채널이 recv/send MOS/EQP 인 메시지만 포함 (Loading... 같은 노이즈 제외)
-    - 단, S6F11은 규칙 적용:
-        * CEID만 있는 S6F11(설비 이벤트 단순 발생) 제외
-        * WORK+CEID가 있는 S6F11(TC 로직 진행)만 포함
+    에러 후보 기준:
+    - level=ERROR
+    - 또는 STATUS=FAIL
+    - 또는 Exception/Traceback 포함
     """
-    if (ev.channel or "") not in LOGIC_CHANNELS:
-        return False
+    kv = getattr(ev, "kv", {}) or {}
 
-    if not ev.msg_name:
-        return False
-
-    if ev.msg_name.upper() == "S6F11":
-        return bool(ev.work and ev.ceid)
-
-    # S6F11이 아닌 메시지(TOOL_CONDITION_REPLY 등)는 채널만 맞으면 포함
-    return True
-
-
-def is_error_like(ev: LogEvent) -> bool:
-    """
-    ✅ 에러 판단: level=ERROR or STATUS=FAIL or Exception 포함
-    """
-    if (ev.level or "").upper() == "ERROR":
+    level = (getattr(ev, "level", "") or kv.get("level") or kv.get("LEVEL") or "").upper()
+    if level == "ERROR":
         return True
-    if (ev.status or "").upper() == "FAIL":
+
+    status = (getattr(ev, "status", "") or kv.get("STATUS") or kv.get("status") or "").upper()
+    if status == "FAIL":
         return True
-    if ev.has_exception:
+
+    raw = (getattr(ev, "raw", "") or kv.get("raw") or "")  # parser가 raw를 넣을 수도/안 넣을 수도
+    # build_timeline에서 원문 라인을 별도로 주입하므로 여기서는 보수적으로만 체크
+    if isinstance(raw, str):
+        up = raw.upper()
+        if "TRACEBACK" in up or "EXCEPTION" in up:
+            return True
+
+    # ERRORMSG/ERRMSG가 있으면 에러 후보로 간주
+    if (kv.get("ERRORMSG") or kv.get("ERRMSG")):
         return True
+
     return False
 
 
-def build_timeline(log_text: str) -> Dict[str, Any]:
-    events: List[LogEvent] = []
-    for raw in (log_text or "").splitlines():
-        ev = parse_line(raw)
+def build_timeline(log_text: str, filename: str = "") -> Dict[str, Any]:
+    """
+    타임라인 정책:
+    - 로직 진행 이벤트: WORK+CEID 동시 존재
+    - 에러/FAIL 이벤트: WORK/CEID 없어도 포함
+    - 단순 CEID-only 이벤트는 제외(에러/FAIL이면 포함)
+    """
+    lines = (log_text or "").splitlines()
+    out: List[Dict[str, Any]] = []
+
+    for raw_line in lines:
+        ev = parse_line(raw_line)
         if not ev:
             continue
-        if not is_logic_event(ev):
+
+        kv = getattr(ev, "kv", {}) or {}
+
+        err_like = is_error_like(ev)
+        logic = is_logic_event(ev)
+
+        # 포함 조건: 로직 이벤트 OR 에러 후보
+        if not (logic or err_like):
             continue
-        events.append(ev)
 
-    # 시간순 정렬(로그가 섞여 들어와도 정렬)
-    events.sort(key=lambda e: e.ts)
+        def g(attr: str, default: str = "") -> str:
+            v = getattr(ev, attr, None)
+            if v is None:
+                return default
+            return str(v)
 
-    timeline: List[Dict[str, Any]] = []
-    for e in events:
-        error_msg = e.kv.get("ERRORMSG") or e.kv.get("ERRMSG") or e.kv.get("ERROR") or ""
-        timeline.append(
-            {
-                "ts": e.ts.isoformat(timespec="milliseconds"),
-                "eqpid": e.eqpid,
-                "carid": e.carid,
-                "lotid": e.lotid,
-                "msg_name": e.msg_name,
-                "channel": e.channel,
-                "work": e.work,
-                "ceid": e.ceid,
-                "status": e.status,
-                "error_msg": error_msg,
-                "error_like": is_error_like(e),
-                "raw": e.raw_msg,
-            }
-        )
+        status = (g("status") or kv.get("STATUS") or kv.get("status") or "")
+        error_msg = (kv.get("ERRORMSG") or kv.get("ERRMSG") or "")
+
+        item = {
+            "ts": g("ts", ""),
+            "eqpid": g("eqpid", kv.get("EQPID", "") or ""),
+            "work": g("work", ""),
+            "ceid": g("ceid", ""),
+            "direction": g("direction", kv.get("DIR", "") or ""),
+            "message": g("msg_name", kv.get("MSG", "") or kv.get("MSGNAME", "") or ""),
+            "status": status,
+            "error_like": bool(err_like),
+            "carid": g("carid", kv.get("CARID", "") or ""),
+            "lotid": g("lotid", kv.get("LOTID", "") or ""),
+            "error_msg": error_msg,
+            "raw": raw_line,
+        }
+        out.append(item)
 
     return {
-        "total_lines": len((log_text or "").splitlines()),
-        "timeline_count": len(timeline),
-        "timeline": timeline,
+        "filename": filename,
+        "total_lines": len(lines),
+        "timeline": out,
     }
