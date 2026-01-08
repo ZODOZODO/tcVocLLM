@@ -24,6 +24,9 @@ MAX_PER_SECTION = int(os.getenv("RETRIEVE_MAX_PER_SECTION", "3"))
 ARROW_EXPAND_THRESHOLD = int(os.getenv("RETRIEVE_ARROW_EXPAND_THRESHOLD", "6"))
 ARROW_EXPAND_MAX = int(os.getenv("RETRIEVE_ARROW_EXPAND_MAX", "6"))
 
+# 절차 섹션 "강제 확장"은 원문 절차가 과다 유입되는 부작용이 있어 기본 OFF
+ENABLE_ARROW_EXPAND = os.getenv("RETRIEVE_ENABLE_ARROW_EXPAND", "0").strip() in ("1", "true", "True", "TRUE")
+
 # ✅ 매 요청마다 만들지 않고 1회 생성(성능/안정성)
 _client = chromadb.PersistentClient(path=CHROMA_DIR)
 _col = _client.get_or_create_collection(name=COLLECTION_NAME)
@@ -150,7 +153,7 @@ def retrieve(query: str, k: int = 6) -> List[Dict[str, Any]]:
 
     # ---- 절차(->)가 많은 섹션이면 같은 섹션 청크를 추가 확보(연속성 강화) ----
     # 질문 하드코딩이 아니라 "상위 문서가 절차형인지"를 보고 보강
-    if picked:
+    if ENABLE_ARROW_EXPAND and picked:
         top = picked[0]
         top_key = _section_key(top)
 
@@ -160,7 +163,7 @@ def retrieve(query: str, k: int = 6) -> List[Dict[str, Any]]:
         if arrow_sum >= ARROW_EXPAND_THRESHOLD:
             # 원본 items에서 같은 섹션 청크를 더 가져오되, chunk_index 순으로 정렬해서 추가
             same_section = [it for it in items if _section_key(it) == top_key]
-            # chunk_index 기반 정렬(없으면 dist)
+
             def _chunk_order(it: Dict[str, Any]) -> Tuple[int, float]:
                 meta = it["metadata"]
                 ci = meta.get("chunk_index", 10**9)
@@ -176,8 +179,6 @@ def retrieve(query: str, k: int = 6) -> List[Dict[str, Any]]:
             existing_ids = set()
             for it in picked:
                 meta = it["metadata"]
-                # ingest에서 stable id를 쓰지만 retriever에서는 id를 include하지 않았으므로
-                # document+chunk_index 조합으로 대체(충분히 실용적)
                 existing_ids.add((meta.get("section_path"), meta.get("chunk_index"), meta.get("sub_index")))
 
             added = 0
@@ -192,5 +193,4 @@ def retrieve(query: str, k: int = 6) -> List[Dict[str, Any]]:
                 if added >= ARROW_EXPAND_MAX:
                     break
 
-    # 최종은 k개만 반환
     return picked[:k]

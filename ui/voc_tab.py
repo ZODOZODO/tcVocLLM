@@ -8,76 +8,94 @@ from ui.ui_helper import (
     scroll_to_bottom,
 )
 
+
 def render_voc_tab(BACKEND_URL: str) -> None:
-    # ---------- state init ----------
-    if "voc_messages" not in st.session_state:
-        st.session_state.voc_messages = []  # [{"role":"user|assistant","content": "..."}]
-    if "voc_status" not in st.session_state:
-        st.session_state.voc_status = "idle"  # idle | queued | calling
-    if "voc_pending_message" not in st.session_state:
-        st.session_state.voc_pending_message = None
-    if "voc_scroll_pending" not in st.session_state:
-        st.session_state.voc_scroll_pending = False
+    st.subheader("VOC Chatbot (Docs RAG)")
 
-    is_busy = st.session_state.voc_status in ("queued", "calling")
+    ss = st.session_state
+    ss.setdefault("voc_messages", [])          # [{"role":"user|assistant","content": "..."}]
+    ss.setdefault("voc_status", "idle")        # idle | queued | calling
+    ss.setdefault("voc_pending_message", None)
+    ss.setdefault("voc_scroll_pending", False)
+    ss.setdefault("voc_use_agent", False)      # Agent toggle
 
-    # idle이면 혹시 남아있을 수 있는 잠금 흔적을 해제(안전장치)
+    client: httpx.Client = get_http_client(timeout=240)
+
+    # ---------- 1) calling phase: UI 렌더링 전에 먼저 처리하고 즉시 rerun ----------
+    if ss.voc_status == "calling" and ss.voc_pending_message:
+        question = ss.voc_pending_message
+
+        with st.spinner("응답 생성 중..."):
+            try:
+                if ss.voc_use_agent:
+                    r = client.post(
+                        f"{BACKEND_URL}/agent/chat",
+                        json={
+                            "message": question,
+                            "mode": "voc",
+                            "k": 6,
+                            "include_debug": False,
+                        },
+                    )
+                else:
+                    r = client.post(f"{BACKEND_URL}/chat", json={"message": question})
+
+                r.raise_for_status()
+                data = r.json()
+                answer = (data.get("answer") or "").strip() or "(빈 응답)"
+            except Exception as e:
+                answer = f"[오류] 백엔드 호출 실패: {e}"
+
+        ss.voc_messages.append({"role": "assistant", "content": answer})
+        ss.voc_pending_message = None
+        ss.voc_status = "idle"
+        ss.voc_scroll_pending = True
+
+        ui_unlock()
+        st.rerun()
+        return  # ✅ 중요: 아래 UI 렌더링이 중복되지 않게 종료
+
+    # ---------- 2) normal UI render ----------
+    is_busy = ss.voc_status in ("queued", "calling")
     if not is_busy:
         ui_unlock()
 
-    # ✅ httpx Client 재사용
-    client: httpx.Client = get_http_client(timeout=240)
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        ss.voc_use_agent = st.checkbox(
+            "Agent로 실행(도구 오케스트레이션)",
+            value=bool(ss.voc_use_agent),
+            disabled=is_busy,
+            key="voc_use_agent_ck",
+        )
+    with c2:
+        st.caption("기본은 /chat, Agent 모드는 /agent/chat(mode=voc) 호출")
 
-    # ---------- phase: calling (실제 백엔드 호출 run) ----------
-    # calling 단계에서는 UI를 그리기 전에 호출을 수행하고 결과 반영 후 rerun
-    if st.session_state.voc_status == "calling" and st.session_state.voc_pending_message:
-        msg = st.session_state.voc_pending_message
-
-        try:
-            r = client.post(f"{BACKEND_URL}/chat", json={"message": msg})
-            r.raise_for_status()
-            data = r.json()
-            answer = data.get("answer", "(no answer)")
-        except Exception as e:
-            answer = f"백엔드 호출 실패: {e}"
-
-        # ✅ 대기용 placeholder를 messages에 넣지 않으므로, 여기서 답변을 1회 append만 하면 됨
-        st.session_state.voc_messages.append({"role": "assistant", "content": answer})
-
-        st.session_state.voc_pending_message = None
-        st.session_state.voc_status = "idle"
-        st.session_state.voc_scroll_pending = True
-        st.rerun()
-
-    # ---------- chat area ----------
+    # ---------- chat history ----------
     chat_box = st.container(height=520, border=True)
     with chat_box:
-        for m in st.session_state.voc_messages:
+        for m in ss.voc_messages:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
 
-        # ✅ busy일 때는 "화면에만" 임시 표시(메시지 리스트에는 저장하지 않음)
         if is_busy:
             with st.chat_message("assistant"):
                 st.markdown("응답 생성 중...")
 
-        # 렌더링이 끝난 뒤 스크롤 실행
-        if st.session_state.voc_scroll_pending:
+        if ss.voc_scroll_pending:
             scroll_to_bottom()
-            st.session_state.voc_scroll_pending = False
+            ss.voc_scroll_pending = False
 
-    # ---------- input area ----------
-    with st.form("voc_chat_form", clear_on_submit=True):
-        col1, col2 = st.columns([8, 1])
-
+    # ---------- input ----------
+    with st.form("voc_input_form", clear_on_submit=True):
+        col1, col2 = st.columns([6, 1])
         with col1:
             user_text = st.text_input(
-                "질문 입력",
-                placeholder="공정/운영 문의를 입력하세요",
+                "질문",
                 disabled=is_busy,
                 label_visibility="collapsed",
+                placeholder="질문을 입력하세요 (docs/md 근거 기반)",
             )
-
         with col2:
             submitted = st.form_submit_button(
                 "전송",
@@ -85,24 +103,20 @@ def render_voc_tab(BACKEND_URL: str) -> None:
                 use_container_width=True,
             )
 
-    # ---------- submit: enqueue ----------
-    if submitted and st.session_state.voc_status == "idle":
+    # ---------- submit -> queue ----------
+    if submitted and ss.voc_status == "idle":
         text = (user_text or "").strip()
         if not text:
             st.warning("질문을 입력한 뒤 전송하세요.")
         else:
-            st.session_state.voc_messages.append({"role": "user", "content": text})
-            st.session_state.voc_pending_message = text
-            st.session_state.voc_status = "queued"
-            st.session_state.voc_scroll_pending = True
+            ss.voc_messages.append({"role": "user", "content": text})
+            ss.voc_pending_message = text
+            ss.voc_status = "queued"
+            ss.voc_scroll_pending = True
             st.rerun()
 
-    # ---------- busy: overlay + DOM lock ----------
-    if is_busy:
+    # ---------- queued -> calling (먼저 '응답 생성 중...'을 렌더링하기 위한 1회 사이클) ----------
+    if ss.voc_status == "queued" and ss.voc_pending_message:
         ui_lock()
-
-    # ---------- phase: queued -> calling ----------
-    # queued run의 목적은 "응답 생성 중..." + 잠금 상태를 먼저 렌더링하기 위함
-    if st.session_state.voc_status == "queued" and st.session_state.voc_pending_message:
-        st.session_state.voc_status = "calling"
+        ss.voc_status = "calling"
         st.rerun()
