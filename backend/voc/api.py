@@ -1,14 +1,14 @@
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
 from dotenv import load_dotenv
 from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
-from backend.llm.router import call_llm_chat
+from backend.llm.client import call_chat
 from backend.voc.rag.retriever import retrieve
 
 load_dotenv()
@@ -227,11 +227,11 @@ def chat(req: ChatRequest):
 """
 
     try:
-        answer = call_llm_chat(system_msg, user_msg) or "(빈 응답)"
+        answer = call_chat(system_msg, user_msg) or "(빈 응답)"
 
         # 1차: 한글이 거의 없으면 한국어로 재작성
         if not _has_hangul(answer):
-            answer2 = call_llm_chat(
+            answer2 = call_chat(
                 system_msg,
                 user_msg,
                 retry_msg=(
@@ -245,7 +245,7 @@ def chat(req: ChatRequest):
 
         # 2차: 중국어/일본어 문자가 섞이면 한국어로만 재작성
         if _has_han_or_kana(answer):
-            answer2 = call_llm_chat(
+            answer2 = call_chat(
                 system_msg,
                 user_msg,
                 retry_msg=(
