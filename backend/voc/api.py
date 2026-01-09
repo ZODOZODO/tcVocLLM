@@ -3,18 +3,15 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel
 
+from backend.llm.router import call_llm_chat
 from backend.voc.rag.retriever import retrieve
 
 load_dotenv()
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 
 # 절차형 근거 판단 기준(근거에 '->' 라인이 충분히 많으면 절차형으로 간주)
 PROCEDURE_MIN_LINES = int(os.getenv("PROCEDURE_MIN_LINES", "8"))
@@ -23,23 +20,7 @@ PROCEDURE_MAX_LINES = int(os.getenv("PROCEDURE_MAX_LINES", "80"))
 # 컨텍스트 과다 방지(청크가 너무 길면 잘라서 넣기)
 MAX_CHUNK_CHARS = int(os.getenv("MAX_CHUNK_CHARS", "1800"))
 
-# Ollama 옵션
-OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
-OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "1000"))
-OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "240"))
-
 router = APIRouter()
-
-# httpx Client 재사용(요청당 오버헤드 감소)
-_http = httpx.Client(timeout=OLLAMA_TIMEOUT)
-
-
-@router.on_event("shutdown")
-def _shutdown():
-    try:
-        _http.close()
-    except Exception:
-        pass
 
 
 class ChatRequest(BaseModel):
@@ -131,34 +112,6 @@ def _extract_procedure_steps(text: str) -> List[Dict[str, str]]:
         uniq.append(s)
 
     return uniq
-
-
-def _call_ollama(system_msg: str, user_msg: str, retry_msg: Optional[str] = None) -> str:
-    """
-    Ollama /api/chat 호출.
-    """
-    messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
-    ]
-    if retry_msg:
-        messages.append({"role": "user", "content": retry_msg})
-
-    r = _http.post(
-        f"{OLLAMA_BASE_URL}/api/chat",
-        json={
-            "model": OLLAMA_MODEL,
-            "stream": False,
-            "messages": messages,
-            "options": {
-                "temperature": OLLAMA_TEMPERATURE,
-                "num_predict": OLLAMA_NUM_PREDICT,
-            },
-        },
-    )
-    r.raise_for_status()
-    data: dict[str, Any] = r.json()
-    return ((data.get("message") or {}).get("content") or "").strip()
 
 
 @router.get("/health")
@@ -274,11 +227,11 @@ def chat(req: ChatRequest):
 """
 
     try:
-        answer = _call_ollama(system_msg, user_msg) or "(빈 응답)"
+        answer = call_llm_chat(system_msg, user_msg) or "(빈 응답)"
 
         # 1차: 한글이 거의 없으면 한국어로 재작성
         if not _has_hangul(answer):
-            answer2 = _call_ollama(
+            answer2 = call_llm_chat(
                 system_msg,
                 user_msg,
                 retry_msg=(
@@ -292,7 +245,7 @@ def chat(req: ChatRequest):
 
         # 2차: 중국어/일본어 문자가 섞이면 한국어로만 재작성
         if _has_han_or_kana(answer):
-            answer2 = _call_ollama(
+            answer2 = call_llm_chat(
                 system_msg,
                 user_msg,
                 retry_msg=(
@@ -307,5 +260,5 @@ def chat(req: ChatRequest):
         return ChatResponse(answer=answer, sources=sources)
 
     except Exception as e:
-        logger.exception("Ollama 호출 실패")
-        return ChatResponse(answer=f"[오류] Ollama 호출 실패: {e}", sources=sources)
+        logger.exception("LLM 호출 실패")
+        return ChatResponse(answer=f"[오류] LLM 호출 실패: {e}", sources=sources)

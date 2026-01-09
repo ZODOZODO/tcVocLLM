@@ -8,7 +8,7 @@ from backend.logs.timeline import build_timeline
 from backend.logs.troubleshoot import recommend_troubleshooting
 from backend.telemetry.store import append_jsonl
 from backend.voc.rag.retriever import retrieve
-from backend.llm.ollama import call_ollama_chat
+from backend.llm.router import call_llm_chat
 
 
 def _has_hangul(s: str) -> bool:
@@ -145,9 +145,12 @@ def run_agent(
 4) 추가 확인 항목(필요한 로그 키/상태/시점 등)
 """
 
-        answer = call_ollama_chat(system_msg, user_msg) or "(빈 응답)"
+        answer = call_llm_chat(system_msg, user_msg) or "(빈 응답)"
         if not _has_hangul(answer):
-            answer = call_ollama_chat(system_msg, user_msg, retry_msg="위 답변은 한국어 설명이 부족합니다. 한국어로 다시 작성하세요.") or answer
+            answer = (
+                call_llm_chat(system_msg, user_msg, retry_msg="위 답변은 한국어 설명이 부족합니다. 한국어로 다시 작성하세요.")
+                or answer
+            )
 
         append_jsonl(
             "agent_chat.jsonl",
